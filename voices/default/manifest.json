@@ -1,4 +1,4 @@
 {
-  "ref_text": "This is a default reference text for voice cloning.",
+  "ref_text": "Hello, this is a reference voice for cloning. I am speaking clearly and naturally so the model can learn my voice characteristics.",
   "language": "English"
 }
