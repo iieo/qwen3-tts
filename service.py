@@ -135,12 +135,12 @@ class TTSService:
         sf.write(buffer, wavs[0], sr, format='WAV')
         return buffer.getvalue()
 
-    @bentoml.api
+    @bentoml.api(route="/voices")
     def list_voices(self) -> list[str]:
         """Returns the list of cached voices."""
         return list(self.voice_cache.keys())
 
-    @bentoml.api
+    @bentoml.get("/health")
     def health(self) -> dict:
         """Simple health check."""
         return {
