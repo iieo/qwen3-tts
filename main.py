@@ -1,6 +1,6 @@
-def main():
-    print("Hello from qwen3-tts!")
+import uvicorn
 
+from config import settings
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run("service:app", host=settings.HOST, port=settings.PORT)

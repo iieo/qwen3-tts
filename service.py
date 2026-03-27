@@ -1,37 +1,33 @@
-import os
-import torch
+import io
 import json
 import logging
-import bentoml
+from contextlib import asynccontextmanager
 from pathlib import Path
-import soundfile as sf
-import io
 
-# Optional build-time import for model
-with bentoml.importing():
-    from qwen_tts import Qwen3TTSModel
+import soundfile as sf
+import torch
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+from pydantic import BaseModel
+from qwen_tts import Qwen3TTSModel
 
 from config import settings
 
-logger = logging.getLogger("bentoml.qwen3_tts")
+logger = logging.getLogger("qwen3_tts")
 
 
-@bentoml.service(
-    name="qwen3-tts",
-    resources={"gpu": settings.NUM_GPUS} if settings.NUM_GPUS > 0 else {
-        "cpu": 2},
-    workers=settings.NUM_WORKERS,
-    traffic={"timeout": 300},
-)
+class SynthesizeRequest(BaseModel):
+    text: str
+    voice: str = "default"
+    language: str = "Auto"
+
+
 class TTSService:
-    def __init__(self):
+    def __init__(self) -> None:
         self.device = self._resolve_device()
         logger.info(f"Initializing Qwen3-TTS on device: {self.device}")
 
-        # Load model
         dtype = torch.bfloat16 if "cpu" not in self.device else torch.float32
-
-        # FlashAttention 2 is only supported on CUDA with specific hardware
         attn_impl = "flash_attention_2" if "cuda" in self.device else "sdpa"
 
         try:
@@ -54,25 +50,15 @@ class TTSService:
         logger.info(
             f"Loaded {len(self.voice_cache)} voices: {list(self.voice_cache.keys())}")
 
-    def _resolve_device(self):
-        """Resolves device based on environment and worker index."""
+    def _resolve_device(self) -> str:
         if torch.cuda.is_available():
-            # BentoML worker_index is 1-based, we want 0-based for GPU ID
-            worker_idx = bentoml.server_context.worker_index - 1
-            if worker_idx < 0:
-                worker_idx = 0
-
-            # If multiple GPUs, distribute workers.
-            # If 1 GPU, map all workers to it (or let torch handle if device_map="auto")
-            gpu_id = worker_idx % torch.cuda.device_count()
-            return f"cuda:{gpu_id}"
+            return "cuda:0"
         elif torch.backends.mps.is_available():
             return "mps"
         return "cpu"
 
-    def _load_voices(self):
-        """Scans the voices directory and caches prompt embeddings."""
-        cache = {}
+    def _load_voices(self) -> dict:
+        cache: dict = {}
         voices_path = settings.VOICES_DIR
 
         if not voices_path.exists():
@@ -84,67 +70,89 @@ class TTSService:
                 continue
 
             manifest_path = voice_dir / "manifest.json"
-            audio_path = voice_dir / "reference.wav"
-
-            if not manifest_path.exists() or not audio_path.exists():
+            if not manifest_path.exists():
                 logger.warning(
-                    f"Skipping voice {voice_dir.name}: missing manifest.json or reference.wav")
+                    f"Skipping voice {voice_dir.name}: missing manifest.json")
                 continue
 
             try:
                 with open(manifest_path, "r") as f:
                     manifest = json.load(f)
 
-                ref_text = manifest.get("ref_text", "")
+                ref_audio = manifest.get("ref_audio", "reference.wav")
+                audio_path = voice_dir / ref_audio
+                if not audio_path.exists():
+                    logger.warning(
+                        f"Skipping voice {voice_dir.name}: missing {ref_audio}")
+                    continue
 
-                # Pre-compute voice embedding
+                ref_text = manifest.get("ref_text", "")
                 prompt_items = self.model.create_voice_clone_prompt(
                     ref_audio=str(audio_path),
                     ref_text=ref_text,
-                    x_vector_only_mode=False if ref_text else True
+                    x_vector_only_mode=not ref_text,
                 )
 
                 cache[voice_dir.name] = {
                     "prompt": prompt_items,
-                    "default_lang": manifest.get("language", "Auto")
+                    "default_lang": manifest.get("language", "Auto"),
                 }
             except Exception as e:
                 logger.error(f"Failed to load voice {voice_dir.name}: {e}")
 
         return cache
 
-    @bentoml.api
-    def synthesize(self, text: str, voice: str = "default", language: str = "Auto") -> bytes:
-        """Synthesizes speech using a cloned voice."""
-        if voice not in self.voice_cache:
-            raise ValueError(
-                f"Voice '{voice}' not found. Available: {list(self.voice_cache.keys())}")
-
+    def synthesize(self, text: str, voice: str, language: str) -> bytes:
         voice_data = self.voice_cache[voice]
         target_lang = language if language != "Auto" else voice_data["default_lang"]
 
-        # Generate audio
         wavs, sr = self.model.generate_voice_clone(
             text=text,
             language=target_lang,
             voice_clone_prompt=voice_data["prompt"]
         )
 
-        # Convert numpy array to WAV bytes
         buffer = io.BytesIO()
         sf.write(buffer, wavs[0], sr, format='WAV')
         return buffer.getvalue()
 
-    @bentoml.api(route="/voices")
-    def list_voices(self) -> list[str]:
-        """Returns the list of cached voices."""
-        return list(self.voice_cache.keys())
 
-    @bentoml.get("/health")
-    def health(self) -> dict:
-        """Simple health check."""
-        return {
-            "status": "healthy",
-            "device": self.device,
-            "voices_loaded": len(self.voice_cache)
-        }
+tts: TTSService | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global tts
+    tts = TTSService()
+    yield
+
+
+app = FastAPI(title="Qwen3-TTS", lifespan=lifespan)
+
+
+@app.post("/synthesize")
+def synthesize(req: SynthesizeRequest) -> Response:
+    assert tts is not None
+    if req.voice not in tts.voice_cache:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Voice '{req.voice}' not found. Available: {list(tts.voice_cache.keys())}",
+        )
+    wav_bytes = tts.synthesize(req.text, req.voice, req.language)
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.get("/voices")
+async def list_voices() -> list[str]:
+    assert tts is not None
+    return list(tts.voice_cache.keys())
+
+
+@app.get("/health")
+async def health() -> dict:
+    assert tts is not None
+    return {
+        "status": "healthy",
+        "device": tts.device,
+        "voices_loaded": len(tts.voice_cache),
+    }

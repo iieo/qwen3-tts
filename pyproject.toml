@@ -5,10 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "bentoml>=1.4.35",
+    "fastapi>=0.115.0",
     "httpx>=0.28.1",
     "pydantic-settings>=2.13.1",
     "qwen-tts>=0.1.1",
     "soundfile>=0.13.1",
     "torch>=2.10.0",
+    "uvicorn[standard]>=0.34.0",
 ]
