@@ -8,7 +8,7 @@ import soundfile as sf
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from qwen_tts import Qwen3TTSModel
 
 from config import settings
@@ -17,7 +17,7 @@ logger = logging.getLogger("qwen3_tts")
 
 
 class SynthesizeRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1, max_length=5000)
     voice: str = "default"
     language: str = "Auto"
 
@@ -117,13 +117,9 @@ class TTSService:
         return buffer.getvalue()
 
 
-tts: TTSService | None = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global tts
-    tts = TTSService()
+    app.state.tts = TTSService()
     yield
 
 
@@ -132,7 +128,7 @@ app = FastAPI(title="Qwen3-TTS", lifespan=lifespan)
 
 @app.post("/synthesize")
 def synthesize(req: SynthesizeRequest) -> Response:
-    assert tts is not None
+    tts: TTSService = app.state.tts
     if req.voice not in tts.voice_cache:
         raise HTTPException(
             status_code=400,
@@ -144,15 +140,16 @@ def synthesize(req: SynthesizeRequest) -> Response:
 
 @app.get("/voices")
 async def list_voices() -> list[str]:
-    assert tts is not None
-    return list(tts.voice_cache.keys())
+    return list(app.state.tts.voice_cache.keys())
 
 
 @app.get("/health")
 async def health() -> dict:
-    assert tts is not None
+    tts: TTSService = app.state.tts
+    voices_loaded = len(tts.voice_cache)
+    status = "healthy" if voices_loaded > 0 else "degraded"
     return {
-        "status": "healthy",
+        "status": status,
         "device": tts.device,
-        "voices_loaded": len(tts.voice_cache),
+        "voices_loaded": voices_loaded,
     }
