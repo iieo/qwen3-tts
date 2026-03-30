@@ -15,12 +15,14 @@ uv sync
 uv run python main.py
 ```
 
-Or with Docker:
+Or with Docker (GPU):
 
 ```bash
 docker build -t qwen3-tts .
-docker run -p 3000:3000 qwen3-tts
+docker run --gpus all -p 3000:3000 qwen3-tts
 ```
+
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host.
 
 ## API
 

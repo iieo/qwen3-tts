@@ -1,15 +1,21 @@
-FROM python:3.13-slim
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsndfile1 ffmpeg && \
+    software-properties-common ca-certificates && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.13 python3.13-venv libsndfile1 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+ENV UV_PYTHON=python3.13
+
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev && \
+    uv pip install torch --index-url https://download.pytorch.org/whl/cu126
 
 COPY . .
 
